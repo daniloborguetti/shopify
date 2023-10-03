@@ -1,0 +1,22 @@
+function mapProductIds() {
+  var productIdsMap = [];
+  var ids = {{dtl - ids - purchase}};
+  var products = {{dtl - products - purchase}};
+
+  if (ids && products && ids.length === products.length) {
+    for (var i = 0; i < ids.length; i++) {
+      var productId = ids[i];
+      var product = products[i];
+
+      productIdsMap.push({
+        item_name: product.name,
+        currency: 'BRL',
+        quantity: product.quantity,
+        item_id: productId,
+        price: product.product.price  
+      });
+    }
+  }
+
+  return productIdsMap;
+}
