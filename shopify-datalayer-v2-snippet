@@ -1,0 +1,186 @@
+{%- comment -%}
+Snippets/datalayer.liquid
+- Compatível com OS 2.0 e novo editor.
+- Sem jQuery. Evita dependências e conflitos.
+- Usa objetos Liquid oficiais do Shopify.
+{%- endcomment -%}
+
+<script>
+  (function(){
+    window.dataLayer = window.dataLayer || [];
+
+    // Pageview básico (shopify storefront)
+    window.dataLayer.push({
+      event: 'pageview',
+      pageCategory: '{{ template | escape }}',
+      pageTitle: {{ page_title | json }},
+      url: {{ (request.origin | append: request.path) | json }},
+      currency: {{ shop.currency | json }}
+    });
+
+    // -------- View Item List / Collection --------
+    {% if template contains 'collection' and collection %}
+      (function(){
+        // Para listas muito grandes, limite p/ evitar payload gigante
+        var items = [
+          {% for product in collection.products limit: 12 %}
+          {
+            item_id: {{ product.id | json }},
+            item_name: {{ product.title | json }},
+            price: {{ product.price | money_without_currency | replace: ',', '.' | json }},
+            item_brand: {{ product.vendor | json }},
+            item_category: {{ product.type | json }},
+            item_list_name: {{ collection.title | json }},
+            productURL: {{ product.url | prepend: request.origin | json }},
+            imageURL: {{ product.featured_image | image_url: width: 800 | prepend: "https:" | json }}
+          }{% unless forloop.last %},{% endunless %}
+          {% endfor %}
+        ];
+
+        window.dataLayer.push({
+          event: 'view_item_list',
+          pageType: 'Collection',
+          ecommerce: { items: items }
+        });
+      })();
+    {% endif %}
+
+    // -------- View Item / Product --------
+    {% if template contains 'product' and product %}
+      (function(){
+        var variant = {{ product.selected_or_first_available_variant | json }};
+        var item = {
+          item_id: {{ product.id | json }},
+          item_name: {{ product.title | json }},
+          item_variant: variant && variant.title ? variant.title : null,
+          price: {{ product.price | money_without_currency | replace: ',', '.' | json }},
+          item_brand: {{ product.vendor | json }},
+          item_category: {{ product.type | json }},
+          productURL: {{ product.url | prepend: request.origin | json }},
+          imageURL: {{ product.featured_image | image_url: width: 800 | prepend: "https:" | json }}
+        };
+
+        window.dataLayer.push({
+          event: 'view_item',
+          pageType: 'Product',
+          ecommerce: { items: [item] }
+        });
+
+        // Add to cart (intercepta submit nativo de /cart/add e fetch para /cart/add.js)
+        function pushAddToCart(payload){
+          window.dataLayer.push({
+            event: 'add_to_cart',
+            ecommerce: { items: [payload] }
+          });
+        }
+
+        // 1) Intercepta submits que contenham quantity/variantId
+        document.addEventListener('submit', function(e){
+          var f = e.target;
+          if(!(f instanceof HTMLFormElement)) return;
+          var action = (f.getAttribute('action') || '').toLowerCase();
+          if(action.indexOf('/cart/add') === -1) return;
+
+          try {
+            var fd = new FormData(f);
+            var qty = Number(fd.get('quantity') || 1);
+            var variantId = fd.get('id');
+            var p = Object.assign({}, item);
+            p.quantity = isNaN(qty) ? 1 : qty;
+            if(variantId) p.item_variant_id = variantId;
+            pushAddToCart(p);
+          } catch(err){}
+        }, true);
+
+        // 2) Intercepta chamadas JS para /cart/add.js
+        var origFetch = window.fetch;
+        window.fetch = function(input, init){
+          var url = (typeof input === 'string') ? input : (input && input.url);
+          var isAdd = url && url.indexOf('/cart/add') > -1;
+          return (origFetch.apply(this, arguments)).then(function(res){
+            if(isAdd){
+              try {
+                res.clone().json().then(function(data){
+                  var line = (data && data.items && data.items[0]) || data;
+                  if(!line) return;
+                  var p = Object.assign({}, item);
+                  p.quantity = Number(line.quantity || 1);
+                  if(line.variant_id) p.item_variant_id = String(line.variant_id);
+                  if(line.price) p.price = Number(line.price)/100;
+                  pushAddToCart(p);
+                }).catch(function(){});
+              } catch(err){}
+            }
+            return res;
+          });
+        };
+      })();
+    {% endif %}
+
+    // -------- View Cart --------
+    {% if template contains 'cart' and cart %}
+      (function(){
+        var items = [
+          {% for line_item in cart.items %}
+          {
+            item_id: {{ line_item.product.id | json }},
+            item_name: {{ line_item.product.title | json }},
+            item_variant: {{ line_item.variant.title | json }},
+            price: {{ line_item.final_price | divided_by: 100.0 | json }},
+            item_brand: {{ line_item.product.vendor | json }},
+            item_category: {{ line_item.product.type | json }},
+            quantity: {{ line_item.quantity | json }}
+          }{% unless forloop.last %},{% endunless %}
+          {% endfor %}
+        ];
+
+        window.dataLayer.push({
+          event: 'view_cart',
+          pageType: 'Cart',
+          ecommerce: {
+            currency: {{ cart.currency.iso_code | json }},
+            value: {{ cart.total_price | divided_by: 100.0 | json }},
+            items: items
+          }
+        });
+
+        // Remove from cart (link para /cart/change?line=…&quantity=0)
+        document.addEventListener('click', function(e){
+          var a = e.target.closest('a[href*="/cart/change"]');
+          if(!a) return;
+          window.dataLayer.push({
+            event: 'remove_from_cart',
+            pageType: 'Remove from cart',
+            // Opcional: envie só o id/linha, o GA4 aceita sem items completos
+          });
+        }, true);
+      })();
+    {% endif %}
+
+    // -------- Begin Checkout (storefront) --------
+    // Em muitos temas o botão/forma redireciona p/ /checkout; este listener é heurístico:
+    document.addEventListener('click', function(e){
+      var el = e.target.closest('a,button,form');
+      if(!el) return;
+      var href = el.getAttribute && el.getAttribute('href');
+      var action = el.getAttribute && el.getAttribute('action');
+      if((href && href.indexOf('/checkout')>-1) || (action && action.indexOf('/checkout')>-1)){
+        window.dataLayer.push({ event: 'begin_checkout' });
+      }
+    }, true);
+
+    // ------- (Opcional) Estado de login resumido -------
+    {% if shop.customer_accounts_enabled %}
+      {% if customer %}
+        window.dataLayer.push({
+          event: 'log_state',
+          logState: 'Logged In',
+          userId: {{ customer.id | json }},
+          customerEmail: {{ customer.email | json }}
+        });
+      {% else %}
+        window.dataLayer.push({ event: 'log_state', logState: 'Logged Out' });
+      {% endif %}
+    {% endif %}
+  })();
+</script>
